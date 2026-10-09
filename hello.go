@@ -1,15 +1,20 @@
 package main
 
 import (
+	"context"
 	"log"
 	"os"
 
 	"github.com/gin-gonic/gin"
+	"go.opentelemetry.io/contrib/instrumentation/github.com/gin-gonic/gin/otelgin"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/gothinkster/golang-gin-realworld-example-app/articles"
 	"github.com/gothinkster/golang-gin-realworld-example-app/common"
+	"github.com/gothinkster/golang-gin-realworld-example-app/instrumentation"
 	"github.com/gothinkster/golang-gin-realworld-example-app/users"
 	"gorm.io/gorm"
+	"gorm.io/plugin/opentelemetry/tracing"
 )
 
 func Migrate(db *gorm.DB) {
@@ -23,7 +28,19 @@ func Migrate(db *gorm.DB) {
 
 func main() {
 
+	shutdown, tracingErr := instrumentation.Setup(context.Background(), "golang-gin-realworld-example-app")
+	if tracingErr == nil {
+		defer func() {
+			if err := shutdown(context.Background()); err != nil {
+				return
+			}
+		}()
+	}
+
 	db := common.Init()
+	if tracingErr == nil {
+		tracingErr = db.Use(tracing.NewPlugin(tracing.WithoutQueryVariables(), tracing.WithoutMetrics()))
+	}
 	Migrate(db)
 	sqlDB, err := db.DB()
 	if err != nil {
@@ -33,6 +50,17 @@ func main() {
 	}
 
 	r := gin.Default()
+	if tracingErr == nil {
+		r.Use(otelgin.Middleware("golang-gin-realworld-example-app"))
+		r.Use(func(c *gin.Context) {
+			name := c.Request.Method
+			if route := c.FullPath(); route != "" {
+				name += " " + route
+			}
+			trace.SpanFromContext(c.Request.Context()).SetName(name)
+			c.Next()
+		})
+	}
 
 	// Disable automatic redirect for trailing slashes
 	// This prevents POST body from being lost during redirects
